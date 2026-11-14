@@ -1,11 +1,13 @@
 
 "use client";
 
-import { useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
 
 type ShortLink = {
-  id: number;
+  id: string;
   title: string;
   slug: string;
   destination: string;
@@ -14,44 +16,12 @@ type ShortLink = {
   status: "Active" | "Paused";
 };
 
-const initialLinks: ShortLink[] = [
-  {
-    id: 1,
-    title: "My Business Website",
-    slug: "business",
-    destination: "https://example.com/business",
-    clicks: 1248,
-    created: "Nov 14, 2026",
-    status: "Active",
-  },
-  {
-    id: 2,
-    title: "Instagram Campaign",
-    slug: "instagram",
-    destination: "https://instagram.com",
-    clicks: 864,
-    created: "Nov 13, 2026",
-    status: "Active",
-  },
-  {
-    id: 3,
-    title: "Product Promotion",
-    slug: "promo",
-    destination: "https://example.com/promotion",
-    clicks: 532,
-    created: "Nov 12, 2026",
-    status: "Active",
-  },
-  {
-    id: 4,
-    title: "YouTube Channel",
-    slug: "youtube",
-    destination: "https://youtube.com",
-    clicks: 318,
-    created: "Nov 10, 2026",
-    status: "Paused",
-  },
-];
+type SupabaseErrorDetails = {
+  message?: string;
+  code?: string;
+  details?: string;
+  hint?: string;
+};
 
 const SHORT_DOMAIN = "nurupy.online";
 
@@ -63,17 +33,111 @@ const navigationLinks = [
   { label: "Analytics", icon: "▥", href: "/dashboard/analytics" },
 ];
 
+function getSupabaseError(error: unknown): SupabaseErrorDetails {
+  if (!error || typeof error !== "object") {
+    return {
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  const value = error as SupabaseErrorDetails;
+
+  return {
+    message: value.message || "An unknown database error occurred.",
+    code: value.code,
+    details: value.details,
+    hint: value.hint,
+  };
+}
+
 export default function LinksPage() {
-  const [links, setLinks] = useState<ShortLink[]>(initialLinks);
+  const supabase = useMemo(() => createClient(), []);
+  const router = useRouter();
+
+  const [links, setLinks] = useState<ShortLink[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [pageError, setPageError] = useState("");
+  const [formError, setFormError] = useState("");
+
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("All");
   const [modalOpen, setModalOpen] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
   const [destination, setDestination] = useState("");
   const [customSlug, setCustomSlug] = useState("");
+
+  const generateSlug = (value: string) =>
+    value
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9-]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 40);
+
+  const loadLinks = useCallback(async () => {
+    setLoading(true);
+    setPageError("");
+
+    try {
+      const {
+        data: { user },
+        error: authError,
+      } = await supabase.auth.getUser();
+
+      if (authError) throw authError;
+
+      if (!user) {
+        router.replace("/login");
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("links")
+        .select("id, title, slug, destination_url, is_active, created_at")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+
+      const databaseLinks: ShortLink[] = (data ?? []).map((item) => ({
+        id: item.id,
+        title: item.title,
+        slug: item.slug,
+        destination: item.destination_url,
+        clicks: 0,
+        created: new Date(item.created_at).toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        }),
+        status: item.is_active ? "Active" : "Paused",
+      }));
+
+      setLinks(databaseLinks);
+    } catch (error) {
+      const details = getSupabaseError(error);
+
+      console.error("Loading links failed:", {
+        ...details,
+        originalError: error,
+      });
+
+      setPageError(
+        details.message || "Unable to load your links. Please try again."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [supabase, router]);
+
+  useEffect(() => {
+    void loadLinks();
+  }, [loadLinks]);
 
   const filteredLinks = useMemo(() => {
     const term = search.toLowerCase().trim();
@@ -100,21 +164,12 @@ export default function LinksPage() {
     0
   );
 
-  function generateSlug(value: string) {
-    return value
-      .toLowerCase()
-      .trim()
-      .replace(/[^a-z0-9-]+/g, "-")
-      .replace(/-+/g, "-")
-      .replace(/^-|-$/g, "")
-      .slice(0, 40);
-  }
-
   function openCreateModal() {
     setEditingId(null);
     setTitle("");
     setDestination("");
     setCustomSlug("");
+    setFormError("");
     setModalOpen(true);
   }
 
@@ -123,19 +178,27 @@ export default function LinksPage() {
     setTitle(link.title);
     setDestination(link.destination);
     setCustomSlug(link.slug);
+    setFormError("");
     setModalOpen(true);
   }
 
   function closeModal() {
+    if (saving) return;
+
     setModalOpen(false);
     setEditingId(null);
     setTitle("");
     setDestination("");
     setCustomSlug("");
+    setFormError("");
   }
 
-  function saveLink(event: FormEvent<HTMLFormElement>) {
+  async function saveLink(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
+    if (saving) return;
+
+    setFormError("");
 
     const normalizedDestination =
       /^https?:\/\//i.test(destination.trim())
@@ -157,58 +220,135 @@ export default function LinksPage() {
         throw new Error("Invalid URL");
       }
     } catch {
-      alert("Please enter a valid website URL.");
+      setFormError("Please enter a valid website URL.");
       return;
     }
 
     const slug = generateSlug(customSlug);
 
     if (!slug) {
-      alert("Please enter a valid custom alias.");
+      setFormError("Please enter a valid custom alias.");
       return;
     }
 
-    const duplicate = links.some(
-      (link) => link.slug === slug && link.id !== editingId
-    );
+    setSaving(true);
 
-    if (duplicate) {
-      alert("This custom alias is already in use. Choose another one.");
-      return;
+    try {
+      const {
+        data: { user },
+        error: authError,
+      } = await supabase.auth.getUser();
+
+      if (authError) throw authError;
+
+      if (!user) {
+        router.replace("/login");
+        return;
+      }
+
+      // Check whether this alias is already used by one of the user's deep links.
+      const { data: deepLink, error: deepLinkError } = await supabase
+        .from("deep_links")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("slug", slug)
+        .maybeSingle();
+
+      if (deepLinkError) throw deepLinkError;
+
+      if (deepLink) {
+        setFormError(
+          "This alias is already being used by one of your deep links."
+        );
+        return;
+      }
+
+      // Check whether this alias is already used by another short link.
+      const { data: existingLink, error: duplicateError } = await supabase
+        .from("links")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("slug", slug)
+        .maybeSingle();
+
+      if (duplicateError) throw duplicateError;
+
+      if (existingLink && existingLink.id !== editingId) {
+        setFormError(
+          "This alias is already in use. Please choose another one."
+        );
+        return;
+      }
+
+      if (editingId) {
+        const { error } = await supabase
+          .from("links")
+          .update({
+            title: title.trim() || "Untitled Link",
+            slug,
+            destination_url: validUrl.href,
+          })
+          .eq("id", editingId)
+          .eq("user_id", user.id);
+
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from("links").insert({
+          user_id: user.id,
+          title: title.trim() || "Untitled Link",
+          slug,
+          destination_url: validUrl.href,
+          is_active: true,
+        });
+
+        if (error) throw error;
+      }
+
+      setModalOpen(false);
+      setEditingId(null);
+      setTitle("");
+      setDestination("");
+      setCustomSlug("");
+
+      await loadLinks();
+    } catch (error: unknown) {
+      const details = getSupabaseError(error);
+
+      console.error("Saving link failed:", {
+        message: details.message,
+        code: details.code,
+        details: details.details,
+        hint: details.hint,
+        originalError: error,
+      });
+
+      const message = details.message || "";
+
+      if (
+        details.code === "23505" ||
+        message.toLowerCase().includes("duplicate") ||
+        message.toLowerCase().includes("unique")
+      ) {
+        setFormError(
+          "This alias is already in use. Please choose another one."
+        );
+      } else {
+        const errorParts = [
+          message,
+          details.code ? `Error code: ${details.code}` : "",
+          details.details ? `Details: ${details.details}` : "",
+          details.hint ? `Hint: ${details.hint}` : "",
+        ].filter(Boolean);
+
+        setFormError(
+          errorParts.length > 0
+            ? errorParts.join("\n")
+            : "Unable to save your link. Please try again."
+        );
+      }
+    } finally {
+      setSaving(false);
     }
-
-    if (editingId !== null) {
-      setLinks((current) =>
-        current.map((link) =>
-          link.id === editingId
-            ? {
-                ...link,
-                title: title.trim() || "Untitled Link",
-                slug,
-                destination: validUrl.href,
-              }
-            : link
-        )
-      );
-    } else {
-      const newLink: ShortLink = {
-        id: Date.now(),
-        title: title.trim() || "Untitled Link",
-        slug,
-        destination: validUrl.href,
-        clicks: 0,
-        created: new Date().toLocaleDateString("en-US", {
-          month: "short",
-          day: "numeric",
-          year: "numeric",
-        }),
-        status: "Active",
-      };
-
-      setLinks((current) => [newLink, ...current]);
-    }
-
-    closeModal();
   }
 
   async function copyLink(link: ShortLink) {
@@ -219,31 +359,64 @@ export default function LinksPage() {
       setCopiedId(link.id);
       window.setTimeout(() => setCopiedId(null), 1800);
     } catch {
-      alert("Copy failed. Please copy the link manually.");
+      window.prompt("Copy your short link:", url);
     }
   }
 
-  function toggleStatus(id: number) {
+  async function toggleStatus(link: ShortLink) {
+    setPageError("");
+
+    const newStatus = link.status !== "Active";
+
     setLinks((current) =>
-      current.map((link) =>
-        link.id === id
-          ? {
-              ...link,
-              status: link.status === "Active" ? "Paused" : "Active",
-            }
-          : link
+      current.map((item) =>
+        item.id === link.id
+          ? { ...item, status: newStatus ? "Active" : "Paused" }
+          : item
       )
     );
+
+    const { error } = await supabase
+      .from("links")
+      .update({ is_active: newStatus })
+      .eq("id", link.id);
+
+    if (error) {
+      const details = getSupabaseError(error);
+
+      console.error("Updating link status failed:", details);
+      setPageError(details.message || "Unable to update link status.");
+      await loadLinks();
+    }
   }
 
-  function deleteLink(id: number) {
+  async function deleteLink(id: string) {
     const confirmed = window.confirm(
-      "Are you sure you want to delete this link?"
+      "Are you sure you want to permanently delete this link?"
     );
 
     if (!confirmed) return;
 
+    setPageError("");
+
+    const previousLinks = links;
     setLinks((current) => current.filter((link) => link.id !== id));
+
+    const { error } = await supabase
+      .from("links")
+      .delete()
+      .eq("id", id);
+
+    if (error) {
+      const details = getSupabaseError(error);
+
+      console.error("Deleting link failed:", details);
+      setLinks(previousLinks);
+      setPageError(details.message || "Unable to delete this link.");
+      return;
+    }
+
+    if (editingId === id) closeModal();
   }
 
   return (
@@ -398,6 +571,23 @@ export default function LinksPage() {
             </button>
           </section>
 
+          {/* ERROR MESSAGE */}
+          {pageError && (
+            <div className="rounded-xl border border-black/15 bg-[#fafafa] p-4 text-sm">
+              <p className="font-semibold">Something went wrong</p>
+              <p className="mt-1 whitespace-pre-wrap text-black/60">
+                {pageError}
+              </p>
+              <button
+                type="button"
+                onClick={() => void loadLinks()}
+                className="mt-3 font-bold underline"
+              >
+                Try again
+              </button>
+            </div>
+          )}
+
           {/* SUMMARY CARDS */}
           <section className="grid gap-4 sm:grid-cols-3">
             {[
@@ -428,7 +618,9 @@ export default function LinksPage() {
                 <h3 className="text-lg font-bold">All your links</h3>
 
                 <p className="mt-1 text-sm text-black/45">
-                  You currently have {links.length} links in your workspace.
+                  {loading
+                    ? "Loading your links..."
+                    : `You currently have ${links.length} links in your workspace.`}
                 </p>
               </div>
 
@@ -478,85 +670,114 @@ export default function LinksPage() {
                 </thead>
 
                 <tbody className="divide-y divide-black/5">
-                  {filteredLinks.map((link) => (
-                    <tr key={link.id} className="hover:bg-[#fafafa]">
-                      <td className="px-6 py-5">
-                        <p className="text-sm font-bold">{link.title}</p>
-
-                        <p className="mt-1 text-xs font-medium text-black/50">
-                          {SHORT_DOMAIN}/{link.slug}
-                        </p>
-
-                        <p className="mt-1 max-w-xs truncate text-xs text-black/35">
-                          {link.destination}
-                        </p>
-                      </td>
-
-                      <td className="px-6 py-5 text-sm font-semibold">
-                        {link.clicks.toLocaleString()}
-                      </td>
-
-                      <td className="px-6 py-5 text-sm text-black/50">
-                        {link.created}
-                      </td>
-
-                      <td className="px-6 py-5">
-                        <span
-                          className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                            link.status === "Active"
-                              ? "bg-[#FFC000]/20 text-black"
-                              : "bg-black/5 text-black/50"
-                          }`}
-                        >
-                          {link.status}
-                        </span>
-                      </td>
-
-                      <td className="px-6 py-5">
-                        <div className="flex justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => copyLink(link)}
-                            className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:border-[#FFC000] hover:bg-[#FFC000]/15"
-                          >
-                            {copiedId === link.id ? "Copied!" : "Copy"}
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => openEditModal(link)}
-                            className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:bg-[#FFC000]/15"
-                          >
-                            Edit
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => toggleStatus(link.id)}
-                            className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:bg-[#FFC000]/15"
-                          >
-                            {link.status === "Active" ? "Pause" : "Activate"}
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => deleteLink(link.id)}
-                            className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:border-[#FFC000] hover:bg-[#FFC000]/15"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-
-                  {filteredLinks.length === 0 && (
+                  {loading ? (
                     <tr>
                       <td
                         colSpan={5}
                         className="px-6 py-16 text-center text-sm text-black/40"
                       >
-                        No links match your search or filter.
+                        Loading your links...
+                      </td>
+                    </tr>
+                  ) : filteredLinks.length > 0 ? (
+                    filteredLinks.map((link) => (
+                      <tr key={link.id} className="hover:bg-[#fafafa]">
+                        <td className="px-6 py-5">
+                          <p className="text-sm font-bold">{link.title}</p>
+
+                          <p className="mt-1 text-xs font-medium text-black/50">
+                            {SHORT_DOMAIN}/{link.slug}
+                          </p>
+
+                          <p className="mt-1 max-w-xs truncate text-xs text-black/35">
+                            {link.destination}
+                          </p>
+                        </td>
+
+                        <td className="px-6 py-5 text-sm font-semibold">
+                          {link.clicks.toLocaleString()}
+                        </td>
+
+                        <td className="px-6 py-5 text-sm text-black/50">
+                          {link.created}
+                        </td>
+
+                        <td className="px-6 py-5">
+                          <span
+                            className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                              link.status === "Active"
+                                ? "bg-[#FFC000]/20 text-black"
+                                : "bg-black/5 text-black/50"
+                            }`}
+                          >
+                            {link.status}
+                          </span>
+                        </td>
+
+                        <td className="px-6 py-5">
+                          <div className="flex justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void copyLink(link)}
+                              className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:border-[#FFC000] hover:bg-[#FFC000]/15"
+                            >
+                              {copiedId === link.id ? "Copied!" : "Copy"}
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => openEditModal(link)}
+                              className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:bg-[#FFC000]/15"
+                            >
+                              Edit
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => void toggleStatus(link)}
+                              className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:bg-[#FFC000]/15"
+                            >
+                              {link.status === "Active" ? "Pause" : "Activate"}
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => void deleteLink(link.id)}
+                              className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:border-[#FFC000] hover:bg-[#FFC000]/15"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td
+                        colSpan={5}
+                        className="px-6 py-16 text-center"
+                      >
+                        {links.length === 0 ? (
+                          <>
+                            <p className="text-base font-bold">
+                              You haven't created any short links yet.
+                            </p>
+                            <p className="mt-2 text-sm text-black/45">
+                              Create your first short link to get started.
+                            </p>
+                            <button
+                              type="button"
+                              onClick={openCreateModal}
+                              className="mt-5 rounded-xl bg-[#FFC000] px-5 py-3 text-sm font-bold"
+                            >
+                              + Create your first link
+                            </button>
+                          </>
+                        ) : (
+                          <p className="text-sm text-black/40">
+                            No links match your search or filter.
+                          </p>
+                        )}
                       </td>
                     </tr>
                   )}
@@ -565,7 +786,7 @@ export default function LinksPage() {
             </div>
 
             <div className="border-t border-black/10 px-6 py-4 text-xs text-black/40">
-              Showing {filteredLinks.length} of {links.length} links
+              Showing {loading ? 0 : filteredLinks.length} of {links.length} links
             </div>
           </section>
 
@@ -605,7 +826,8 @@ export default function LinksPage() {
               <button
                 type="button"
                 onClick={closeModal}
-                className="flex h-9 w-9 items-center justify-center rounded-full bg-black/5 text-xl hover:bg-[#FFC000]"
+                disabled={saving}
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-black/5 text-xl hover:bg-[#FFC000] disabled:opacity-50"
                 aria-label="Close dialog"
               >
                 ×
@@ -679,20 +901,32 @@ export default function LinksPage() {
                 </p>
               </div>
 
+              {formError && (
+                <div className="rounded-xl border border-black/15 bg-[#fafafa] p-3 text-sm text-black/70">
+                  <p className="whitespace-pre-wrap">{formError}</p>
+                </div>
+              )}
+
               <div className="flex gap-3 pt-2">
                 <button
                   type="button"
                   onClick={closeModal}
-                  className="flex-1 rounded-xl border border-black/10 px-4 py-3 text-sm font-semibold hover:bg-black/5"
+                  disabled={saving}
+                  className="flex-1 rounded-xl border border-black/10 px-4 py-3 text-sm font-semibold hover:bg-black/5 disabled:opacity-50"
                 >
                   Cancel
                 </button>
 
                 <button
                   type="submit"
-                  className="flex-1 rounded-xl bg-[#FFC000] px-4 py-3 text-sm font-bold hover:brightness-95"
+                  disabled={saving}
+                  className="flex-1 rounded-xl bg-[#FFC000] px-4 py-3 text-sm font-bold hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {editingId !== null ? "Save changes" : "Create link"}
+                  {saving
+                    ? "Saving..."
+                    : editingId !== null
+                      ? "Save changes"
+                      : "Create link"}
                 </button>
               </div>
             </form>

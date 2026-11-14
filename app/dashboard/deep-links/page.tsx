@@ -1,11 +1,13 @@
 
 "use client";
 
-import { useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
 
 type DeepLink = {
-  id: number;
+  id: string;
   title: string;
   slug: string;
   androidPackage: string;
@@ -19,48 +21,6 @@ type DeepLink = {
 };
 
 const SHORT_DOMAIN = "nurupy.online";
-
-const initialDeepLinks: DeepLink[] = [
-  {
-    id: 1,
-    title: "My Shopping App",
-    slug: "shopping",
-    androidPackage: "com.example.shopping",
-    androidTarget: "shopping://home",
-    iosBundle: "com.example.shopping",
-    iosTarget: "shopping://home",
-    fallback: "https://example.com/shop",
-    clicks: 1250,
-    created: "Nov 14, 2026",
-    status: "Active",
-  },
-  {
-    id: 2,
-    title: "My Business App",
-    slug: "business-app",
-    androidPackage: "com.example.business",
-    androidTarget: "business://dashboard",
-    iosBundle: "com.example.business",
-    iosTarget: "business://dashboard",
-    fallback: "https://example.com/business",
-    clicks: 840,
-    created: "Nov 12, 2026",
-    status: "Active",
-  },
-  {
-    id: 3,
-    title: "My Creator App",
-    slug: "creator",
-    androidPackage: "com.example.creator",
-    androidTarget: "creator://profile",
-    iosBundle: "com.example.creator",
-    iosTarget: "creator://profile",
-    fallback: "https://example.com/creator",
-    clicks: 320,
-    created: "Nov 10, 2026",
-    status: "Paused",
-  },
-];
 
 const navigationLinks = [
   { label: "Overview", icon: "▦", href: "/dashboard" },
@@ -96,13 +56,46 @@ function isValidWebUrl(value: string): boolean {
 
     return (
       ["http:", "https:"].includes(url.protocol) &&
-      url.hostname.includes(".") &&
-      !url.hostname.startsWith(".") &&
-      !url.hostname.endsWith(".")
+      url.hostname.includes(".")
     );
   } catch {
     return false;
   }
+}
+
+function isValidAppScheme(value: string): boolean {
+  try {
+    const url = new URL(value.trim());
+
+    return (
+      /^[a-z][a-z0-9+.-]*$/i.test(url.protocol.replace(":", "")) &&
+      !["javascript:", "data:", "file:", "http:", "https:"].includes(
+        url.protocol
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isValidDestination(value: string): boolean {
+  const trimmed = value.trim();
+
+  // Empty Android/iOS destinations are allowed.
+  if (!trimmed) return true;
+
+  // Normal website URLs are allowed.
+  if (/^https?:\/\//i.test(trimmed)) {
+    return isValidWebUrl(trimmed);
+  }
+
+  // Custom app schemes such as myapp://home are allowed.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) {
+    return isValidAppScheme(trimmed);
+  }
+
+  // Website addresses without https:// are also allowed.
+  return isValidWebUrl(trimmed);
 }
 
 function generateSlug(value: string): string {
@@ -115,18 +108,110 @@ function generateSlug(value: string): string {
     .slice(0, 40);
 }
 
+function getErrorMessage(error: unknown): string {
+  if (error && typeof error === "object") {
+    const dbError = error as {
+      message?: string;
+      details?: string;
+      hint?: string;
+      code?: string;
+    };
+
+    return [
+      dbError.message,
+      dbError.details,
+      dbError.hint,
+      dbError.code ? `Code: ${dbError.code}` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  return error instanceof Error
+    ? error.message
+    : "An unexpected error occurred.";
+}
+
 export default function DeepLinksPage() {
-  const [deepLinks, setDeepLinks] =
-    useState<DeepLink[]>(initialDeepLinks);
+  const router = useRouter();
+
+  const [deepLinks, setDeepLinks] = useState<DeepLink[]>([]);
+  const [userId, setUserId] = useState<string | null>(null);
+
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [pageError, setPageError] = useState("");
+  const [formError, setFormError] = useState("");
 
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("All");
 
   const [modalOpen, setModalOpen] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const [form, setForm] = useState<DeepLinkForm>(emptyForm);
+
+  const loadLinks = useCallback(async () => {
+    setLoading(true);
+    setPageError("");
+
+    try {
+      const supabase = createClient();
+
+      const { data: authData, error: authError } =
+        await supabase.auth.getUser();
+
+      if (authError || !authData.user) {
+        router.replace("/login");
+        return;
+      }
+
+      const user = authData.user;
+      setUserId(user.id);
+
+      const { data, error } = await supabase
+        .from("deep_links")
+        .select(
+          "id,name,slug,android_package,android_url,ios_bundle_id,ios_url,fallback_url,is_active,created_at"
+        )
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+
+      const mapped: DeepLink[] = (data ?? []).map((item) => ({
+        id: item.id,
+        title: item.name,
+        slug: item.slug,
+        androidPackage: item.android_package ?? "",
+        androidTarget: item.android_url ?? "",
+        iosBundle: item.ios_bundle_id ?? "",
+        iosTarget: item.ios_url ?? "",
+        fallback: item.fallback_url,
+        clicks: 0,
+        created: new Date(item.created_at).toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        }),
+        status: item.is_active ? "Active" : "Paused",
+      }));
+
+      setDeepLinks(mapped);
+    } catch (error) {
+      console.error("Loading deep links failed:", error);
+      setPageError(
+        `Could not load your deep links: ${getErrorMessage(error)}`
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [router]);
+
+  useEffect(() => {
+    void loadLinks();
+  }, [loadLinks]);
 
   const filteredLinks = useMemo(() => {
     const term = search.toLowerCase().trim();
@@ -148,11 +233,6 @@ export default function DeepLinksPage() {
     (link) => link.status === "Active"
   ).length;
 
-  const totalClicks = deepLinks.reduce(
-    (total, link) => total + link.clicks,
-    0
-  );
-
   function updateForm(field: keyof DeepLinkForm, value: string) {
     setForm((current) => ({
       ...current,
@@ -163,6 +243,7 @@ export default function DeepLinksPage() {
   function openCreateModal() {
     setEditingId(null);
     setForm(emptyForm);
+    setFormError("");
     setModalOpen(true);
   }
 
@@ -179,94 +260,162 @@ export default function DeepLinksPage() {
       fallback: link.fallback,
     });
 
+    setFormError("");
     setModalOpen(true);
   }
 
   function closeModal() {
+    if (saving) return;
+
     setModalOpen(false);
     setEditingId(null);
     setForm(emptyForm);
+    setFormError("");
   }
 
-  function saveDeepLink(event: FormEvent<HTMLFormElement>) {
+  async function saveDeepLink(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
+    if (saving || !userId) return;
+
     const slug = generateSlug(form.slug);
+    const title = form.title.trim();
 
-    if (!form.title.trim()) {
-      alert("Please enter a name for your deep link.");
+    const androidPackage = form.androidPackage.trim();
+    const androidTarget = form.androidTarget.trim();
+
+    const iosBundle = form.iosBundle.trim();
+    const iosTarget = form.iosTarget.trim();
+
+    if (!title || !slug) {
+      setFormError("Please provide a name and a valid alias.");
       return;
     }
 
-    if (!slug) {
-      alert("Please enter a valid custom alias.");
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
+      setFormError("Use letters, numbers and hyphens for your alias.");
       return;
     }
 
-    if (!isValidWebUrl(form.fallback)) {
-      alert("Please enter a valid website fallback URL.");
-      return;
-    }
-
+    // Android package name is optional.
     if (
-      !form.androidPackage.trim() ||
-      !form.androidTarget.trim() ||
-      !form.iosBundle.trim() ||
-      !form.iosTarget.trim()
+      androidPackage &&
+      !/^[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)+$/.test(androidPackage)
     ) {
-      alert("Please complete the Android and iOS app details.");
+      setFormError("Enter a valid Android package name.");
       return;
     }
 
-    const duplicate = deepLinks.some(
-      (link) => link.slug === slug && link.id !== editingId
-    );
-
-    if (duplicate) {
-      alert("This alias is already in use. Please choose another one.");
+    // iOS bundle identifier is optional.
+    if (
+      iosBundle &&
+      !/^[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)+$/.test(iosBundle)
+    ) {
+      setFormError("Enter a valid iOS bundle identifier.");
       return;
     }
 
-    if (editingId !== null) {
-      setDeepLinks((current) =>
-        current.map((link) =>
-          link.id === editingId
-            ? {
-                ...link,
-                title: form.title.trim(),
-                slug,
-                androidPackage: form.androidPackage.trim(),
-                androidTarget: form.androidTarget.trim(),
-                iosBundle: form.iosBundle.trim(),
-                iosTarget: form.iosTarget.trim(),
-                fallback: normalizeUrl(form.fallback),
-              }
-            : link
-        )
+    // Android and iOS destinations can be websites or app links.
+    if (
+      !isValidDestination(androidTarget) ||
+      !isValidDestination(iosTarget)
+    ) {
+      setFormError(
+        "Enter a valid website URL or app destination in the Android and iOS sections."
       );
-    } else {
-      const newLink: DeepLink = {
-        id: Date.now(),
-        title: form.title.trim(),
+      return;
+    }
+
+    if (!form.fallback.trim() || !isValidWebUrl(form.fallback)) {
+      setFormError("Please enter a valid website fallback URL.");
+      return;
+    }
+
+    setSaving(true);
+    setFormError("");
+
+    try {
+      const supabase = createClient();
+
+      // Check whether another deep link already uses this alias.
+      const { data: existingDeep, error: deepCheckError } =
+        await supabase
+          .from("deep_links")
+          .select("id")
+          .eq("user_id", userId)
+          .eq("slug", slug)
+          .maybeSingle();
+
+      if (deepCheckError) throw deepCheckError;
+
+      if (existingDeep && existingDeep.id !== editingId) {
+        throw new Error(
+          "This alias is already used by another deep link."
+        );
+      }
+
+      // Check this account's short links too.
+      const { data: existingShort, error: shortCheckError } =
+        await supabase
+          .from("links")
+          .select("id")
+          .eq("user_id", userId)
+          .eq("slug", slug)
+          .maybeSingle();
+
+      if (shortCheckError) throw shortCheckError;
+
+      if (existingShort) {
+        throw new Error(
+          "This alias is already used by one of your short links."
+        );
+      }
+
+      const payload = {
+        name: title,
         slug,
-        androidPackage: form.androidPackage.trim(),
-        androidTarget: form.androidTarget.trim(),
-        iosBundle: form.iosBundle.trim(),
-        iosTarget: form.iosTarget.trim(),
-        fallback: normalizeUrl(form.fallback),
-        clicks: 0,
-        created: new Date().toLocaleDateString("en-US", {
-          month: "short",
-          day: "numeric",
-          year: "numeric",
-        }),
-        status: "Active",
+        android_package: androidPackage || null,
+        android_url: androidTarget
+          ? normalizeUrl(androidTarget.startsWith("http") ? androidTarget : androidTarget)
+          : null,
+        ios_bundle_id: iosBundle || null,
+        ios_url: iosTarget
+          ? normalizeUrl(iosTarget.startsWith("http") ? iosTarget : iosTarget)
+          : null,
+        fallback_url: normalizeUrl(form.fallback),
       };
 
-      setDeepLinks((current) => [newLink, ...current]);
-    }
+      if (editingId) {
+        const { error } = await supabase
+          .from("deep_links")
+          .update(payload)
+          .eq("id", editingId)
+          .eq("user_id", userId);
 
-    closeModal();
+        if (error) throw error;
+      } else {
+        const { error } = await supabase
+          .from("deep_links")
+          .insert({
+            ...payload,
+            user_id: userId,
+            is_active: true,
+          });
+
+        if (error) throw error;
+      }
+
+      setModalOpen(false);
+      setEditingId(null);
+      setForm(emptyForm);
+
+      await loadLinks();
+    } catch (error) {
+      console.error("Saving deep link failed:", error);
+      setFormError(getErrorMessage(error));
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function copyDeepLink(link: DeepLink) {
@@ -275,46 +424,80 @@ export default function DeepLinksPage() {
     try {
       await navigator.clipboard.writeText(url);
       setCopiedId(link.id);
+
       window.setTimeout(() => setCopiedId(null), 1800);
     } catch {
       alert("Copy failed. Please copy the link manually.");
     }
   }
 
-  function toggleStatus(id: number) {
-    setDeepLinks((current) =>
-      current.map((link) =>
-        link.id === id
-          ? {
-              ...link,
-              status: link.status === "Active" ? "Paused" : "Active",
-            }
-          : link
-      )
-    );
+  async function toggleStatus(link: DeepLink) {
+    if (!userId) return;
+
+    const supabase = createClient();
+    const newStatus = link.status !== "Active";
+
+    try {
+      const { error } = await supabase
+        .from("deep_links")
+        .update({ is_active: newStatus })
+        .eq("id", link.id)
+        .eq("user_id", userId);
+
+      if (error) throw error;
+
+      setDeepLinks((current) =>
+        current.map((item) =>
+          item.id === link.id
+            ? {
+                ...item,
+                status: newStatus ? "Active" : "Paused",
+              }
+            : item
+        )
+      );
+    } catch (error) {
+      console.error("Updating deep link status failed:", error);
+      alert(`Could not update link: ${getErrorMessage(error)}`);
+    }
   }
 
-  function deleteDeepLink(id: number) {
+  async function deleteDeepLink(link: DeepLink) {
+    if (!userId) return;
+
     const confirmed = window.confirm(
-      "Are you sure you want to delete this deep link?"
+      `Are you sure you want to delete "${link.title}"? This cannot be undone.`
     );
 
     if (!confirmed) return;
 
-    setDeepLinks((current) =>
-      current.filter((link) => link.id !== id)
-    );
+    try {
+      const supabase = createClient();
+
+      const { error } = await supabase
+        .from("deep_links")
+        .delete()
+        .eq("id", link.id)
+        .eq("user_id", userId);
+
+      if (error) throw error;
+
+      setDeepLinks((current) =>
+        current.filter((item) => item.id !== link.id)
+      );
+    } catch (error) {
+      console.error("Deleting deep link failed:", error);
+      alert(`Could not delete link: ${getErrorMessage(error)}`);
+    }
   }
 
   return (
     <div className="min-h-screen bg-white text-[#111111]">
-      {/* MOBILE HEADER */}
       <header className="fixed left-0 right-0 top-0 z-40 flex h-16 items-center justify-between border-b border-black/10 bg-white px-5 lg:hidden">
         <Link href="/dashboard" className="flex items-center gap-2">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#FFC000] font-bold">
             N
           </div>
-
           <span className="font-bold">
             NuruPy <span className="text-[#FFC000]">Links</span>
           </span>
@@ -328,7 +511,6 @@ export default function DeepLinksPage() {
         </Link>
       </header>
 
-      {/* SIDEBAR */}
       <aside className="fixed bottom-0 left-0 top-0 z-30 hidden w-64 flex-col border-r border-black/10 bg-white lg:flex">
         <Link
           href="/dashboard"
@@ -386,7 +568,7 @@ export default function DeepLinksPage() {
 
           <Link
             href="/dashboard/settings"
-            className="flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold text-black/55 transition hover:bg-[#FFC000]/10 hover:text-black"
+            className="flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold text-black/55 hover:bg-[#FFC000]/10 hover:text-black"
           >
             <span className="w-5 text-center text-lg">⚙</span>
             Settings
@@ -414,30 +596,25 @@ export default function DeepLinksPage() {
         </div>
       </aside>
 
-      {/* MAIN CONTENT */}
       <main className="min-h-screen pt-16 lg:ml-64 lg:pt-0">
         <header className="sticky top-0 z-20 hidden h-20 items-center justify-between border-b border-black/10 bg-white/95 px-8 backdrop-blur lg:flex">
           <div>
             <p className="text-sm text-black/45">
               Workspace / Deep Linking
             </p>
-
-            <h1 className="mt-1 text-xl font-bold">
-              Deep Linking
-            </h1>
+            <h1 className="mt-1 text-xl font-bold">Deep Linking</h1>
           </div>
 
           <button
             type="button"
             onClick={openCreateModal}
-            className="rounded-full bg-[#FFC000] px-5 py-3 text-sm font-bold transition hover:brightness-95"
+            className="rounded-full bg-[#FFC000] px-5 py-3 text-sm font-bold hover:brightness-95"
           >
             + Create deep link
           </button>
         </header>
 
         <div className="mx-auto max-w-7xl space-y-7 p-5 sm:p-8">
-          {/* INTRO */}
           <section className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
             <div>
               <p className="text-sm font-medium text-black/45">
@@ -449,88 +626,90 @@ export default function DeepLinksPage() {
               </h2>
 
               <p className="mt-2 max-w-2xl text-sm leading-6 text-black/45">
-                Create smart links that can direct visitors to your Android
-                app, iOS app, or website when the app is unavailable.
+                Create smart links that direct visitors to Android, iOS,
+                or any website destination.
               </p>
             </div>
 
             <button
               type="button"
               onClick={openCreateModal}
-              className="rounded-xl bg-[#FFC000] px-5 py-3 text-sm font-bold transition hover:brightness-95 lg:hidden"
+              className="rounded-xl bg-[#FFC000] px-5 py-3 text-sm font-bold hover:brightness-95 lg:hidden"
             >
               + Create deep link
             </button>
           </section>
 
-          {/* PLATFORM INFORMATION */}
+          {pageError && (
+            <div className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-700">
+              {pageError}
+
+              <button
+                type="button"
+                onClick={loadLinks}
+                className="ml-3 font-bold underline"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
           <section className="grid gap-4 md:grid-cols-3">
-            <div className="rounded-2xl border border-black/10 bg-white p-5">
-              <div className="flex items-center gap-3">
-                <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#FFC000]/20 text-xl">
-                  <span>🤖</span>
+            {[
+              [
+                "Android",
+                "Android destination",
+                "Use an app link or any website URL.",
+                "🤖",
+              ],
+              [
+                "iOS",
+                "iPhone and iPad destination",
+                "Use an app link or any website URL.",
+                "",
+              ],
+              [
+                "Web fallback",
+                "Browser destination",
+                "Send visitors to a website when needed.",
+                "🌐",
+              ],
+            ].map(([title, subtitle, description, icon]) => (
+              <div
+                key={title}
+                className="rounded-2xl border border-black/10 bg-white p-5"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#FFC000]/20 text-xl">
+                    {icon}
+                  </div>
+
+                  <div>
+                    <h3 className="font-bold">{title}</h3>
+                    <p className="text-xs text-black/45">{subtitle}</p>
+                  </div>
                 </div>
 
-                <div>
-                  <h3 className="font-bold">Android</h3>
-                  <p className="text-xs text-black/45">
-                    Android app destination
-                  </p>
-                </div>
+                <p className="mt-4 text-sm leading-6 text-black/50">
+                  {description}
+                </p>
               </div>
-
-              <p className="mt-4 text-sm leading-6 text-black/50">
-                Open the appropriate screen in an installed Android app.
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-black/10 bg-white p-5">
-              <div className="flex items-center gap-3">
-                <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#FFC000]/20 text-xl">
-                  <span></span>
-                </div>
-
-                <div>
-                  <h3 className="font-bold">iOS</h3>
-                  <p className="text-xs text-black/45">
-                    iPhone and iPad destination
-                  </p>
-                </div>
-              </div>
-
-              <p className="mt-4 text-sm leading-6 text-black/50">
-                Open the appropriate screen in an installed iOS app.
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-black/10 bg-white p-5">
-              <div className="flex items-center gap-3">
-                <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#FFC000]/20 text-xl">
-                  <span>🌐</span>
-                </div>
-
-                <div>
-                  <h3 className="font-bold">Web fallback</h3>
-                  <p className="text-xs text-black/45">
-                    Browser destination
-                  </p>
-                </div>
-              </div>
-
-              <p className="mt-4 text-sm leading-6 text-black/50">
-                Send visitors to a website when the mobile app cannot open.
-              </p>
-            </div>
+            ))}
           </section>
 
-          {/* SUMMARY */}
           <section className="grid gap-4 sm:grid-cols-3">
             {[
-              { label: "Total deep links", value: deepLinks.length },
-              { label: "Active deep links", value: activeCount },
+              {
+                label: "Total deep links",
+                value: loading ? "…" : deepLinks.length,
+              },
+              {
+                label: "Active deep links",
+                value: loading ? "…" : activeCount,
+              },
               {
                 label: "Total clicks",
-                value: totalClicks.toLocaleString(),
+                value: loading ? "…" : "0",
               },
             ].map((stat) => (
               <div
@@ -546,7 +725,6 @@ export default function DeepLinksPage() {
             ))}
           </section>
 
-          {/* DEEP LINKS TABLE */}
           <section className="overflow-hidden rounded-2xl border border-black/10 bg-white">
             <div className="space-y-5 border-b border-black/10 p-5 sm:p-6">
               <div>
@@ -573,7 +751,7 @@ export default function DeepLinksPage() {
                       type="button"
                       key={item}
                       onClick={() => setFilter(item)}
-                      className={`rounded-lg px-4 py-2.5 text-sm font-semibold transition ${
+                      className={`rounded-lg px-4 py-2.5 text-sm font-semibold ${
                         filter === item
                           ? "bg-[#FFC000] text-black"
                           : "border border-black/10 text-black/55 hover:bg-[#FFC000]/10"
@@ -590,18 +768,10 @@ export default function DeepLinksPage() {
               <table className="w-full min-w-[850px] text-left">
                 <thead className="bg-[#fafafa] text-xs uppercase tracking-wider text-black/40">
                   <tr>
-                    <th className="px-6 py-4 font-semibold">
-                      Deep link
-                    </th>
-                    <th className="px-6 py-4 font-semibold">
-                      Clicks
-                    </th>
-                    <th className="px-6 py-4 font-semibold">
-                      Created
-                    </th>
-                    <th className="px-6 py-4 font-semibold">
-                      Status
-                    </th>
+                    <th className="px-6 py-4 font-semibold">Deep link</th>
+                    <th className="px-6 py-4 font-semibold">Clicks</th>
+                    <th className="px-6 py-4 font-semibold">Created</th>
+                    <th className="px-6 py-4 font-semibold">Status</th>
                     <th className="px-6 py-4 text-right font-semibold">
                       Actions
                     </th>
@@ -609,97 +779,112 @@ export default function DeepLinksPage() {
                 </thead>
 
                 <tbody className="divide-y divide-black/5">
-                  {filteredLinks.map((link) => (
-                    <tr key={link.id} className="hover:bg-[#fafafa]">
-                      <td className="px-6 py-5">
-                        <p className="text-sm font-bold">
-                          {link.title}
-                        </p>
-
-                        <p className="mt-1 text-xs font-medium text-black/50">
-                          {SHORT_DOMAIN}/{link.slug}
-                        </p>
-
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          <span className="rounded-md bg-[#FFC000]/20 px-2 py-1 text-[10px] font-semibold text-black">
-                            Android
-                          </span>
-
-                          <span className="rounded-md bg-[#FFC000]/20 px-2 py-1 text-[10px] font-semibold text-black">
-                            iOS
-                          </span>
-
-                          <span className="rounded-md bg-black/5 px-2 py-1 text-[10px] font-semibold text-black/60">
-                            Web fallback
-                          </span>
-                        </div>
-                      </td>
-
-                      <td className="px-6 py-5 text-sm font-semibold">
-                        {link.clicks.toLocaleString()}
-                      </td>
-
-                      <td className="px-6 py-5 text-sm text-black/50">
-                        {link.created}
-                      </td>
-
-                      <td className="px-6 py-5">
-                        <span
-                          className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                            link.status === "Active"
-                              ? "bg-[#FFC000]/20 text-black"
-                              : "bg-black/5 text-black/50"
-                          }`}
-                        >
-                          {link.status}
-                        </span>
-                      </td>
-
-                      <td className="px-6 py-5">
-                        <div className="flex justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => copyDeepLink(link)}
-                            className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:border-[#FFC000] hover:bg-[#FFC000]/15"
-                          >
-                            {copiedId === link.id ? "Copied!" : "Copy"}
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => openEditModal(link)}
-                            className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:bg-[#FFC000]/15"
-                          >
-                            Edit
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => toggleStatus(link.id)}
-                            className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:bg-[#FFC000]/15"
-                          >
-                            {link.status === "Active" ? "Pause" : "Activate"}
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => deleteDeepLink(link.id)}
-                            className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:border-[#FFC000] hover:bg-[#FFC000]/15"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-
-                  {filteredLinks.length === 0 && (
+                  {loading ? (
                     <tr>
                       <td
                         colSpan={5}
                         className="px-6 py-16 text-center text-sm text-black/40"
                       >
-                        No deep links match your search or filter.
+                        Loading your deep links...
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredLinks.map((link) => (
+                      <tr key={link.id} className="hover:bg-[#fafafa]">
+                        <td className="px-6 py-5">
+                          <p className="text-sm font-bold">{link.title}</p>
+
+                          <p className="mt-1 text-xs font-medium text-black/50">
+                            {SHORT_DOMAIN}/{link.slug}
+                          </p>
+
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {link.androidTarget && (
+                              <span className="rounded-md bg-[#FFC000]/20 px-2 py-1 text-[10px] font-semibold">
+                                Android
+                              </span>
+                            )}
+
+                            {link.iosTarget && (
+                              <span className="rounded-md bg-[#FFC000]/20 px-2 py-1 text-[10px] font-semibold">
+                                iOS
+                              </span>
+                            )}
+
+                            <span className="rounded-md bg-black/5 px-2 py-1 text-[10px] font-semibold text-black/60">
+                              Web fallback
+                            </span>
+                          </div>
+                        </td>
+
+                        <td className="px-6 py-5 text-sm font-semibold">
+                          0
+                        </td>
+
+                        <td className="px-6 py-5 text-sm text-black/50">
+                          {link.created}
+                        </td>
+
+                        <td className="px-6 py-5">
+                          <span
+                            className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                              link.status === "Active"
+                                ? "bg-[#FFC000]/20 text-black"
+                                : "bg-black/5 text-black/50"
+                            }`}
+                          >
+                            {link.status}
+                          </span>
+                        </td>
+
+                        <td className="px-6 py-5">
+                          <div className="flex justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => copyDeepLink(link)}
+                              className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:border-[#FFC000] hover:bg-[#FFC000]/15"
+                            >
+                              {copiedId === link.id ? "Copied!" : "Copy"}
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => openEditModal(link)}
+                              className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:bg-[#FFC000]/15"
+                            >
+                              Edit
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => toggleStatus(link)}
+                              className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:bg-[#FFC000]/15"
+                            >
+                              {link.status === "Active" ? "Pause" : "Activate"}
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => deleteDeepLink(link)}
+                              className="rounded-lg border border-black/10 px-3 py-2 text-xs font-semibold hover:border-[#FFC000] hover:bg-[#FFC000]/15"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+
+                  {!loading && filteredLinks.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={5}
+                        className="px-6 py-16 text-center text-sm text-black/40"
+                      >
+                        {deepLinks.length === 0
+                          ? "You haven't created any deep links yet."
+                          : "No deep links match your search or filter."}
                       </td>
                     </tr>
                   )}
@@ -712,51 +897,34 @@ export default function DeepLinksPage() {
             </div>
           </section>
 
-          {/* HOW IT WORKS */}
           <section className="rounded-2xl border border-black/10 bg-[#fafafa] p-5 sm:p-7">
-            <h3 className="text-lg font-bold">
-              How deep linking works
-            </h3>
+            <h3 className="text-lg font-bold">How deep linking works</h3>
 
             <p className="mt-2 text-sm leading-6 text-black/50">
-              A visitor opens your NuruPy link. The system checks the
-              visitor&apos;s device and directs them to the correct app
-              destination when supported. If the app is unavailable, the
-              visitor is sent to your website fallback.
+              A visitor opens your NuruPy link. The system selects the
+              appropriate destination. The destination can be a website or
+              an app link. Actual app opening also requires the mobile app
+              to support the configured links.
             </p>
 
             <div className="mt-5 grid gap-3 sm:grid-cols-3">
               {[
-                {
-                  number: "01",
-                  title: "Visitor clicks",
-                  description: "Someone opens your shared deep link.",
-                },
-                {
-                  number: "02",
-                  title: "Device is checked",
-                  description: "The correct Android or iOS destination is selected.",
-                },
-                {
-                  number: "03",
-                  title: "Destination opens",
-                  description: "The app opens or the website fallback is used.",
-                },
-              ].map((step) => (
+                ["01", "Visitor clicks", "Someone opens your shared deep link."],
+                ["02", "Destination is selected", "The appropriate destination is chosen."],
+                ["03", "Destination opens", "The app or website destination opens."],
+              ].map(([number, title, description]) => (
                 <div
-                  key={step.number}
+                  key={number}
                   className="rounded-xl border border-black/10 bg-white p-4"
                 >
                   <p className="text-sm font-bold text-[#B88B00]">
-                    {step.number}
+                    {number}
                   </p>
 
-                  <h4 className="mt-2 text-sm font-bold">
-                    {step.title}
-                  </h4>
+                  <h4 className="mt-2 text-sm font-bold">{title}</h4>
 
                   <p className="mt-1 text-xs leading-5 text-black/45">
-                    {step.description}
+                    {description}
                   </p>
                 </div>
               ))}
@@ -769,7 +937,6 @@ export default function DeepLinksPage() {
         </div>
       </main>
 
-      {/* CREATE / EDIT MODAL */}
       {modalOpen && (
         <div
           className="fixed inset-0 z-[60] flex items-center justify-center overflow-y-auto bg-black/50 p-4"
@@ -789,19 +956,18 @@ export default function DeepLinksPage() {
                   id="deep-link-modal-title"
                   className="text-xl font-bold"
                 >
-                  {editingId !== null
-                    ? "Edit deep link"
-                    : "Create a deep link"}
+                  {editingId ? "Edit deep link" : "Create a deep link"}
                 </h3>
 
                 <p className="mt-1 text-sm text-black/45">
-                  Configure your Android, iOS and web destinations.
+                  Configure your Android, iOS and website destinations.
                 </p>
               </div>
 
               <button
                 type="button"
                 onClick={closeModal}
+                disabled={saving}
                 className="flex h-9 w-9 items-center justify-center rounded-full bg-black/5 text-xl hover:bg-[#FFC000]"
                 aria-label="Close dialog"
               >
@@ -810,11 +976,8 @@ export default function DeepLinksPage() {
             </div>
 
             <form onSubmit={saveDeepLink} className="mt-7 space-y-6">
-              {/* BASIC DETAILS */}
               <div className="space-y-4">
-                <h4 className="text-sm font-bold">
-                  Basic information
-                </h4>
+                <h4 className="text-sm font-bold">Basic information</h4>
 
                 <div>
                   <label
@@ -869,7 +1032,6 @@ export default function DeepLinksPage() {
 
               <div className="border-t border-black/10" />
 
-              {/* ANDROID */}
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
                   <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#FFC000]/20">
@@ -878,11 +1040,11 @@ export default function DeepLinksPage() {
 
                   <div>
                     <h4 className="text-sm font-bold">
-                      Android configuration
+                      Android configuration (optional)
                     </h4>
 
                     <p className="text-xs text-black/40">
-                      Details for your Android application
+                      Leave empty if you do not have an Android destination.
                     </p>
                   </div>
                 </div>
@@ -892,12 +1054,11 @@ export default function DeepLinksPage() {
                     htmlFor="android-package"
                     className="mb-2 block text-sm font-semibold"
                   >
-                    Android package name
+                    Android package name (optional)
                   </label>
 
                   <input
                     id="android-package"
-                    required
                     value={form.androidPackage}
                     onChange={(event) =>
                       updateForm("androidPackage", event.target.value)
@@ -912,25 +1073,28 @@ export default function DeepLinksPage() {
                     htmlFor="android-target"
                     className="mb-2 block text-sm font-semibold"
                   >
-                    Android deep link destination
+                    Android destination URL (optional)
                   </label>
 
                   <input
                     id="android-target"
-                    required
+                    type="text"
                     value={form.androidTarget}
                     onChange={(event) =>
                       updateForm("androidTarget", event.target.value)
                     }
-                    placeholder="myapp://home"
+                    placeholder="https://example.com or myapp://home"
                     className="w-full rounded-xl border border-black/10 px-4 py-3 text-sm outline-none focus:border-[#FFC000]"
                   />
+
+                  <p className="mt-2 text-xs text-black/40">
+                    Website URLs, app links and custom app schemes are accepted.
+                  </p>
                 </div>
               </div>
 
               <div className="border-t border-black/10" />
 
-              {/* IOS */}
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
                   <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#FFC000]/20 text-lg">
@@ -939,11 +1103,11 @@ export default function DeepLinksPage() {
 
                   <div>
                     <h4 className="text-sm font-bold">
-                      iOS configuration
+                      iOS configuration (optional)
                     </h4>
 
                     <p className="text-xs text-black/40">
-                      Details for your iPhone and iPad application
+                      Leave empty if you do not have an iOS destination.
                     </p>
                   </div>
                 </div>
@@ -953,12 +1117,11 @@ export default function DeepLinksPage() {
                     htmlFor="ios-bundle"
                     className="mb-2 block text-sm font-semibold"
                   >
-                    iOS bundle identifier
+                    iOS bundle identifier (optional)
                   </label>
 
                   <input
                     id="ios-bundle"
-                    required
                     value={form.iosBundle}
                     onChange={(event) =>
                       updateForm("iosBundle", event.target.value)
@@ -973,25 +1136,28 @@ export default function DeepLinksPage() {
                     htmlFor="ios-target"
                     className="mb-2 block text-sm font-semibold"
                   >
-                    iOS deep link destination
+                    iOS destination URL (optional)
                   </label>
 
                   <input
                     id="ios-target"
-                    required
+                    type="text"
                     value={form.iosTarget}
                     onChange={(event) =>
                       updateForm("iosTarget", event.target.value)
                     }
-                    placeholder="myapp://home"
+                    placeholder="https://example.com or myapp://home"
                     className="w-full rounded-xl border border-black/10 px-4 py-3 text-sm outline-none focus:border-[#FFC000]"
                   />
+
+                  <p className="mt-2 text-xs text-black/40">
+                    Website URLs, app links and custom app schemes are accepted.
+                  </p>
                 </div>
               </div>
 
               <div className="border-t border-black/10" />
 
-              {/* WEB FALLBACK */}
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
                   <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#FFC000]/20 text-lg">
@@ -999,12 +1165,10 @@ export default function DeepLinksPage() {
                   </span>
 
                   <div>
-                    <h4 className="text-sm font-bold">
-                      Website fallback
-                    </h4>
+                    <h4 className="text-sm font-bold">Website fallback</h4>
 
                     <p className="text-xs text-black/40">
-                      Where visitors go if the app cannot open
+                      Required destination for visitors.
                     </p>
                   </div>
                 </div>
@@ -1019,6 +1183,7 @@ export default function DeepLinksPage() {
 
                   <input
                     id="deep-fallback"
+                    type="text"
                     required
                     value={form.fallback}
                     onChange={(event) =>
@@ -1032,30 +1197,42 @@ export default function DeepLinksPage() {
 
               <div className="rounded-xl border border-[#FFC000]/40 bg-[#FFC000]/10 p-4">
                 <p className="text-xs leading-5 text-black/65">
-                  <strong>Important:</strong> These settings save the
-                  destination details in this demo interface. Actual app
-                  opening requires Android App Links or iOS Universal Links
-                  configuration and the appropriate mobile app setup.
+                  <strong>Important:</strong> Android and iOS settings are
+                  optional. You can enter website URLs or app destinations
+                  in either section. Actual app opening still requires
+                  appropriate mobile app and operating-system configuration.
                 </p>
               </div>
 
-              {/* FORM BUTTONS */}
+              {formError && (
+                <div
+                  role="alert"
+                  className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-700"
+                >
+                  {formError}
+                </div>
+              )}
+
               <div className="flex gap-3 pt-2">
                 <button
                   type="button"
                   onClick={closeModal}
-                  className="flex-1 rounded-xl border border-black/10 px-4 py-3 text-sm font-semibold hover:bg-black/5"
+                  disabled={saving}
+                  className="flex-1 rounded-xl border border-black/10 px-4 py-3 text-sm font-semibold hover:bg-black/5 disabled:opacity-50"
                 >
                   Cancel
                 </button>
 
                 <button
                   type="submit"
-                  className="flex-1 rounded-xl bg-[#FFC000] px-4 py-3 text-sm font-bold hover:brightness-95"
+                  disabled={saving}
+                  className="flex-1 rounded-xl bg-[#FFC000] px-4 py-3 text-sm font-bold hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {editingId !== null
-                    ? "Save changes"
-                    : "Create deep link"}
+                  {saving
+                    ? "Saving..."
+                    : editingId
+                      ? "Save changes"
+                      : "Create deep link"}
                 </button>
               </div>
             </form>
