@@ -18,7 +18,7 @@ type DeepLink = {
   status: "Active" | "Paused";
 };
 
-const SHORT_DOMAIN = "nurupy.link";
+const SHORT_DOMAIN = "nurupy.online";
 
 const initialDeepLinks: DeepLink[] = [
   {

@@ -53,7 +53,7 @@ const initialLinks: ShortLink[] = [
   },
 ];
 
-const SHORT_DOMAIN = "nurupy.link";
+const SHORT_DOMAIN = "nurupy.online";
 
 const navigationLinks = [
   { label: "Overview", icon: "▦", href: "/dashboard" },
