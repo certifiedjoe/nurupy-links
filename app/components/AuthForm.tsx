@@ -1,8 +1,7 @@
-
 "use client";
 
-import Link from "next/link";
 import { useState, type FormEvent } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "../../lib/supabase/client";
 
@@ -11,110 +10,47 @@ type AuthFormProps = {
 };
 
 export default function AuthForm({ mode }: AuthFormProps) {
-  const isRegister = mode === "register";
   const router = useRouter();
   const supabase = createClient();
 
+  const isRegister = mode === "register";
+
+  const [fullName, setFullName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+
   const [showPassword, setShowPassword] = useState(false);
-  const [passwordValue, setPasswordValue] = useState("");
-  const [confirmPasswordValue, setConfirmPasswordValue] = useState("");
-  const [error, setError] = useState("");
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+
+  const [rememberMe, setRememberMe] = useState(true);
   const [loading, setLoading] = useState(false);
 
-  const passwordRules = [
-    {
-      label: "At least 8 characters",
-      valid: passwordValue.length >= 8,
-    },
-    {
-      label: "One uppercase letter (A-Z)",
-      valid: /[A-Z]/.test(passwordValue),
-    },
-    {
-      label: "One lowercase letter (a-z)",
-      valid: /[a-z]/.test(passwordValue),
-    },
-    {
-      label: "One number (0-9)",
-      valid: /[0-9]/.test(passwordValue),
-    },
-    {
-      label: "One special character (!@#$%)",
-      valid: /[^A-Za-z0-9]/.test(passwordValue),
-    },
-  ];
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
 
-  const passwordIsValid = passwordRules.every((rule) => rule.valid);
-
-  const passwordStrength = passwordRules.filter(
-    (rule) => rule.valid
-  ).length;
-
-  function getFriendlyError(message: string) {
-    const normalized = message.toLowerCase();
-
-    if (
-      normalized.includes("invalid login credentials") ||
-      normalized.includes("invalid credentials")
-    ) {
-      return "The email address or password is incorrect. Please check your details and try again.";
-    }
-
-    if (
-      normalized.includes("email not confirmed") ||
-      normalized.includes("email_not_confirmed")
-    ) {
-      return "Your email address has not been verified yet. Please check your inbox for the confirmation email.";
-    }
-
-    if (normalized.includes("user already registered")) {
-      return "An account with this email already exists. Please log in instead.";
-    }
-
-    if (normalized.includes("password should be")) {
-      return "Your password does not meet the security requirements. Please choose a stronger password.";
-    }
-
-    if (
-      normalized.includes("rate limit") ||
-      normalized.includes("too many requests")
-    ) {
-      return "Too many attempts. Please wait a little before trying again.";
-    }
-
-    if (
-      normalized.includes("network") ||
-      normalized.includes("fetch")
-    ) {
-      return "We could not connect to our server. Please check your internet connection and try again.";
-    }
-
-    return message;
-  }
+  const passwordValid =
+    password.length >= 8 &&
+    /[A-Z]/.test(password) &&
+    /[a-z]/.test(password) &&
+    /[0-9]/.test(password);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     setError("");
-
-    const formData = new FormData(event.currentTarget);
-
-    const fullName = String(formData.get("fullName") || "").trim();
-    const email = String(formData.get("email") || "")
-      .trim()
-      .toLowerCase();
-
-    const password = passwordValue;
-    const confirmPassword = confirmPasswordValue;
+    setMessage("");
 
     if (isRegister) {
-      if (fullName.length < 2) {
+      if (!fullName.trim()) {
         setError("Please enter your full name.");
         return;
       }
 
-      if (!passwordIsValid) {
-        setError("Please complete all the password requirements.");
+      if (!passwordValid) {
+        setError(
+          "Password must contain at least 8 characters, including uppercase, lowercase and a number."
+        );
         return;
       }
 
@@ -124,7 +60,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
       }
     }
 
-    if (!email) {
+    if (!email.trim()) {
       setError("Please enter your email address.");
       return;
     }
@@ -138,16 +74,22 @@ export default function AuthForm({ mode }: AuthFormProps) {
 
     try {
       if (isRegister) {
-        const emailRedirectTo =
-          `${window.location.origin}/auth/callback?next=/welcome`;
+        // Use the production domain in production.
+        // Use localhost only when testing locally.
+        const siteUrl =
+          process.env.NODE_ENV === "production"
+            ? "https://nurupy.online"
+            : window.location.origin;
 
-        const { error: signUpError } =
+        const emailRedirectTo = `${siteUrl}/auth/callback`;
+
+        const { data, error: signUpError } =
           await supabase.auth.signUp({
-            email,
+            email: email.trim(),
             password,
             options: {
               data: {
-                full_name: fullName,
+                full_name: fullName.trim(),
               },
               emailRedirectTo,
             },
@@ -157,18 +99,24 @@ export default function AuthForm({ mode }: AuthFormProps) {
           throw signUpError;
         }
 
-        // Supabase email confirmation is enabled.
-        // Send the user to the dedicated verification page.
-        router.replace(
-          `/verify-email?email=${encodeURIComponent(email)}`
-        );
+        // If email confirmation is enabled, Supabase sends a verification email.
+        if (!data.session) {
+          router.replace(
+            `/verify-email?email=${encodeURIComponent(email.trim())}`
+          );
+          return;
+        }
 
+        // If confirmation is disabled, continue directly to the dashboard.
+        router.replace("/dashboard");
+        router.refresh();
         return;
       }
 
+      // LOGIN
       const { error: signInError } =
         await supabase.auth.signInWithPassword({
-          email,
+          email: email.trim(),
           password,
         });
 
@@ -179,360 +127,268 @@ export default function AuthForm({ mode }: AuthFormProps) {
       router.replace("/dashboard");
       router.refresh();
       return;
-    } catch (err) {
+    } catch (err: unknown) {
       const errorMessage =
         err instanceof Error
           ? err.message
           : "Something went wrong. Please try again.";
 
-      setError(getFriendlyError(errorMessage));
+      setError(errorMessage);
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-white px-4 py-12 sm:px-6">
+    <main className="flex min-h-screen items-center justify-center bg-white px-4 py-10 text-[#111111]">
       <div className="w-full max-w-md">
 
-        {/* LOGO */}
-        <Link
-          href="/"
-          className="mb-10 flex items-center justify-center gap-2"
-        >
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#FFC000] text-lg font-bold text-black">
-            N
-          </div>
+        {/* Logo */}
+        <div className="mb-8 text-center">
+          <Link
+            href="/"
+            className="text-3xl font-extrabold tracking-tight text-[#111111]"
+          >
+            NuruPy<span className="text-[#FFC000]">.</span>
+          </Link>
 
-          <span className="text-xl font-bold tracking-tight text-[#111111]">
-            NuruPy <span className="text-[#FFC000]">Links</span>
-          </span>
-        </Link>
+          <p className="mt-2 text-sm text-gray-500">
+            Smart links. Better connections.
+          </p>
+        </div>
 
-        {/* AUTHENTICATION CARD */}
-        <div className="rounded-3xl border border-black/10 bg-white p-6 shadow-xl shadow-black/5 sm:p-9">
+        {/* Form Card */}
+        <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-xl sm:p-8">
 
-          {/* HEADING */}
-          <div className="mb-8 text-center">
-            <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-[#FFC000]/15">
-              <span className="text-2xl text-black">
-                {isRegister ? "✦" : "↗"}
-              </span>
-            </div>
-
-            <h1 className="text-3xl font-semibold tracking-tight text-[#111111]">
-              {isRegister
-                ? "Create your account"
-                : "Welcome back"}
+          <div className="mb-7">
+            <h1 className="text-2xl font-bold text-[#111111]">
+              {isRegister ? "Create your account" : "Welcome back"}
             </h1>
 
-            <p className="mt-3 text-sm leading-relaxed text-black/50">
+            <p className="mt-2 text-sm text-gray-500">
               {isRegister
-                ? "Create your NuruPy account and start managing smarter links."
-                : "Sign in to access your links, QR codes and analytics."}
+                ? "Create your NuruPy account to get started."
+                : "Sign in to continue to your NuruPy dashboard."}
             </p>
           </div>
 
+          {/* Error */}
+          {error && (
+            <div
+              role="alert"
+              className="mb-5 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+            >
+              {error}
+            </div>
+          )}
+
+          {/* Success message */}
+          {message && (
+            <div
+              role="status"
+              className="mb-5 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700"
+            >
+              {message}
+            </div>
+          )}
+
           <form onSubmit={handleSubmit} className="space-y-5">
 
-            {/* FULL NAME */}
+            {/* Full Name */}
             {isRegister && (
               <div>
                 <label
                   htmlFor="fullName"
-                  className="mb-2 block text-sm font-medium text-black"
+                  className="mb-2 block text-sm font-semibold"
                 >
-                  Full name
+                  Full Name
                 </label>
 
                 <input
                   id="fullName"
-                  name="fullName"
                   type="text"
                   autoComplete="name"
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
                   placeholder="Enter your full name"
                   required
-                  minLength={2}
-                  className="w-full rounded-xl border border-black/15 bg-white px-4 py-3.5 text-sm text-black outline-none transition placeholder:text-black/30 focus:border-[#FFC000] focus:ring-2 focus:ring-[#FFC000]/20"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 text-sm outline-none transition focus:border-[#FFC000] focus:ring-2 focus:ring-[#FFC000]/20"
                 />
               </div>
             )}
 
-            {/* EMAIL */}
+            {/* Email */}
             <div>
               <label
                 htmlFor="email"
-                className="mb-2 block text-sm font-medium text-black"
+                className="mb-2 block text-sm font-semibold"
               >
-                Email address
+                Email Address
               </label>
 
               <input
                 id="email"
-                name="email"
                 type="email"
                 autoComplete="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
                 required
-                className="w-full rounded-xl border border-black/15 bg-white px-4 py-3.5 text-sm text-black outline-none transition placeholder:text-black/30 focus:border-[#FFC000] focus:ring-2 focus:ring-[#FFC000]/20"
+                className="w-full rounded-lg border border-gray-300 px-4 py-3 text-sm outline-none transition focus:border-[#FFC000] focus:ring-2 focus:ring-[#FFC000]/20"
               />
             </div>
 
-            {/* PASSWORD */}
+            {/* Password */}
             <div>
               <label
                 htmlFor="password"
-                className="mb-2 block text-sm font-medium text-black"
+                className="mb-2 block text-sm font-semibold"
               >
-                {isRegister ? "Create password" : "Password"}
+                Password
               </label>
 
               <div className="relative">
                 <input
                   id="password"
-                  name="password"
                   type={showPassword ? "text" : "password"}
                   autoComplete={
-                    isRegister
-                      ? "new-password"
-                      : "current-password"
+                    isRegister ? "new-password" : "current-password"
                   }
-                  placeholder={
-                    isRegister
-                      ? "Create a strong password"
-                      : "Enter your password"
-                  }
-                  minLength={isRegister ? 8 : undefined}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Enter your password"
                   required
-                  value={passwordValue}
-                  onChange={(event) =>
-                    setPasswordValue(event.target.value)
-                  }
-                  className="w-full rounded-xl border border-black/15 bg-white px-4 py-3.5 pr-20 text-sm text-black outline-none transition placeholder:text-black/30 focus:border-[#FFC000] focus:ring-2 focus:ring-[#FFC000]/20"
+                  className="w-full rounded-lg border border-gray-300 px-4 py-3 pr-20 text-sm outline-none transition focus:border-[#FFC000] focus:ring-2 focus:ring-[#FFC000]/20"
                 />
 
                 <button
                   type="button"
-                  onClick={() =>
-                    setShowPassword(!showPassword)
-                  }
-                  className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-semibold text-black/50 transition hover:text-black"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-gray-500 hover:text-[#111111]"
                 >
                   {showPassword ? "Hide" : "Show"}
                 </button>
               </div>
 
-              {/* LIVE PASSWORD REQUIREMENTS */}
               {isRegister && (
-                <div className="mt-4 rounded-xl border border-black/10 bg-black/[0.02] p-4">
-
-                  <p className="mb-3 text-sm font-semibold text-[#111111]">
-                    Your password must contain:
-                  </p>
-
-                  <div className="space-y-2">
-                    {passwordRules.map((rule) => (
-                      <div
-                        key={rule.label}
-                        className="flex items-center gap-2"
-                      >
-                        <span
-                          className={
-                            rule.valid
-                              ? "font-bold text-green-600"
-                              : "text-black/30"
-                          }
-                        >
-                          {rule.valid ? "✓" : "○"}
-                        </span>
-
-                        <span
-                          className={
-                            rule.valid
-                              ? "text-sm text-green-700"
-                              : "text-sm text-black/50"
-                          }
-                        >
-                          {rule.label}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* PASSWORD STRENGTH */}
-                  <div className="mt-5">
-                    <div className="mb-2 flex items-center justify-between text-xs">
-                      <span className="text-black/50">
-                        Password strength
-                      </span>
-
-                      <span className="font-semibold text-black">
-                        {passwordValue.length === 0
-                          ? "Not started"
-                          : passwordStrength === 5
-                            ? "Strong"
-                            : passwordStrength <= 2
-                              ? "Weak"
-                              : "Getting stronger"}
-                      </span>
-                    </div>
-
-                    <div className="flex gap-1">
-                      {passwordRules.map((rule, index) => (
-                        <div
-                          key={index}
-                          className={`h-1.5 flex-1 rounded-full transition ${
-                            rule.valid
-                              ? "bg-[#FFC000]"
-                              : "bg-black/10"
-                          }`}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                </div>
+                <p className="mt-2 text-xs text-gray-500">
+                  Use at least 8 characters, with uppercase, lowercase and a number.
+                </p>
               )}
             </div>
 
-            {/* CONFIRM PASSWORD */}
+            {/* Confirm Password */}
             {isRegister && (
               <div>
                 <label
                   htmlFor="confirmPassword"
-                  className="mb-2 block text-sm font-medium text-black"
+                  className="mb-2 block text-sm font-semibold"
                 >
-                  Confirm password
+                  Confirm Password
                 </label>
 
                 <div className="relative">
                   <input
                     id="confirmPassword"
-                    name="confirmPassword"
-                    type={showPassword ? "text" : "password"}
+                    type={showConfirmPassword ? "text" : "password"}
                     autoComplete="new-password"
-                    placeholder="Enter your password again"
-                    minLength={8}
-                    required
-                    value={confirmPasswordValue}
-                    onChange={(event) =>
-                      setConfirmPasswordValue(event.target.value)
+                    value={confirmPassword}
+                    onChange={(e) =>
+                      setConfirmPassword(e.target.value)
                     }
-                    className="w-full rounded-xl border border-black/15 bg-white px-4 py-3.5 pr-10 text-sm text-black outline-none transition placeholder:text-black/30 focus:border-[#FFC000] focus:ring-2 focus:ring-[#FFC000]/20"
+                    placeholder="Confirm your password"
+                    required
+                    className="w-full rounded-lg border border-gray-300 px-4 py-3 pr-20 text-sm outline-none transition focus:border-[#FFC000] focus:ring-2 focus:ring-[#FFC000]/20"
                   />
 
-                  {confirmPasswordValue.length > 0 && (
-                    <span
-                      className={`absolute right-4 top-1/2 -translate-y-1/2 font-bold ${
-                        passwordValue === confirmPasswordValue
-                          ? "text-green-600"
-                          : "text-red-500"
-                      }`}
-                    >
-                      {passwordValue === confirmPasswordValue
-                        ? "✓"
-                        : "×"}
-                    </span>
-                  )}
-                </div>
-
-                {confirmPasswordValue.length > 0 && (
-                  <p
-                    className={`mt-2 text-xs ${
-                      passwordValue === confirmPasswordValue
-                        ? "text-green-700"
-                        : "text-red-600"
-                    }`}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setShowConfirmPassword(!showConfirmPassword)
+                    }
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-gray-500 hover:text-[#111111]"
                   >
-                    {passwordValue === confirmPasswordValue
-                      ? "Your passwords match."
-                      : "Your passwords do not match yet."}
-                  </p>
-                )}
+                    {showConfirmPassword ? "Hide" : "Show"}
+                  </button>
+                </div>
               </div>
             )}
 
-            {/* FORGOT PASSWORD */}
+            {/* Remember Me / Forgot Password */}
             {!isRegister && (
-              <div className="flex justify-end">
+              <div className="flex items-center justify-between gap-3">
+                <label className="flex cursor-pointer items-center gap-2 text-sm text-gray-600">
+                  <input
+                    type="checkbox"
+                    checked={rememberMe}
+                    onChange={(e) => setRememberMe(e.target.checked)}
+                    className="h-4 w-4 accent-[#FFC000]"
+                  />
+                  Remember me
+                </label>
+
                 <Link
                   href="/forgot-password"
-                  className="text-sm font-medium text-black underline decoration-[#FFC000] decoration-2 underline-offset-4 transition hover:text-black/60"
+                  className="text-sm font-semibold text-[#111111] hover:text-[#B88900]"
                 >
                   Forgot password?
                 </Link>
               </div>
             )}
 
-            {/* ERROR MESSAGE */}
-            {error && (
-              <div
-                role="alert"
-                className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm leading-relaxed text-red-700"
-              >
-                {error}
-              </div>
-            )}
-
-            {/* SUBMIT BUTTON */}
+            {/* Submit */}
             <button
               type="submit"
-              disabled={
-                loading ||
-                (isRegister &&
-                  (!passwordIsValid ||
-                    passwordValue !== confirmPasswordValue))
-              }
-              className="w-full rounded-xl bg-[#FFC000] px-5 py-4 font-semibold text-black shadow-lg shadow-[#FFC000]/20 transition hover:-translate-y-0.5 hover:brightness-95 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={loading}
+              className="w-full rounded-lg bg-[#FFC000] px-4 py-3.5 text-sm font-bold text-[#111111] transition hover:bg-[#E6AD00] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {loading
-                ? isRegister
-                  ? "Creating your account..."
-                  : "Signing you in..."
+                ? "Please wait..."
                 : isRegister
-                  ? "Create account"
-                  : "Sign in"}
+                  ? "Create Account"
+                  : "Sign In"}
             </button>
-
-            <p className="text-center text-xs leading-relaxed text-black/40">
-              {isRegister
-                ? "By creating an account, you agree to use NuruPy Links responsibly."
-                : "Your account is protected by secure authentication."}
-            </p>
           </form>
 
-          {/* SWITCH AUTHENTICATION */}
-          <div className="mt-8 border-t border-black/10 pt-6 text-center text-sm text-black/50">
+          {/* Switch Mode */}
+          <div className="mt-7 text-center text-sm text-gray-600">
             {isRegister ? (
               <>
                 Already have an account?{" "}
                 <Link
                   href="/login"
-                  className="font-semibold text-black underline decoration-[#FFC000] decoration-2 underline-offset-4"
+                  className="font-bold text-[#111111] underline decoration-[#FFC000] decoration-2 underline-offset-4"
                 >
                   Sign in
                 </Link>
               </>
             ) : (
               <>
-                New to NuruPy Links?{" "}
+                Don&apos;t have an account?{" "}
                 <Link
                   href="/register"
-                  className="font-semibold text-black underline decoration-[#FFC000] decoration-2 underline-offset-4"
+                  className="font-bold text-[#111111] underline decoration-[#FFC000] decoration-2 underline-offset-4"
                 >
-                  Create an account
+                  Create account
                 </Link>
               </>
             )}
           </div>
         </div>
 
-        {/* BACK TO HOMEPAGE */}
-        <Link
-          href="/"
-          className="mt-8 block text-center text-sm text-black/40 transition hover:text-black"
-        >
-          ← Back to homepage
-        </Link>
+        {/* Footer */}
+        <p className="mt-6 text-center text-xs text-gray-500">
+          By continuing, you agree to use NuruPy responsibly.
+        </p>
+
+        <div className="mt-4 text-center">
+          <Link
+            href="/"
+            className="text-sm font-semibold text-gray-500 hover:text-[#111111]"
+          >
+            ← Back to Home
+          </Link>
+        </div>
       </div>
     </main>
   );

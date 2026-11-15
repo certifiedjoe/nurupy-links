@@ -56,6 +56,7 @@ export default function LinksPage() {
 
   const [links, setLinks] = useState<ShortLink[]>([]);
   const [loading, setLoading] = useState(true);
+  const [userName, setUserName] = useState("there");
   const [saving, setSaving] = useState(false);
   const [pageError, setPageError] = useState("");
   const [formError, setFormError] = useState("");
@@ -95,6 +96,14 @@ export default function LinksPage() {
         router.replace("/login");
         return;
       }
+
+      // Get the registered user's full name.
+      const registeredName =
+        user.user_metadata?.full_name?.trim() ||
+        user.email?.split("@")[0] ||
+        "there";
+
+      setUserName(registeredName);
 
       const { data, error } = await supabase
         .from("links")
@@ -508,11 +517,11 @@ export default function LinksPage() {
         <div className="mt-auto border-t border-black/10 p-5">
           <div className="flex items-center gap-3 rounded-xl bg-[#fafafa] p-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#FFC000] font-bold">
-              U
+              {userName.charAt(0).toUpperCase()}
             </div>
 
-            <div>
-              <p className="text-sm font-bold">Your Account</p>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-bold">{userName}</p>
               <p className="text-xs text-black/45">Free Plan</p>
             </div>
           </div>
@@ -554,7 +563,7 @@ export default function LinksPage() {
               </p>
 
               <h2 className="mt-1 text-2xl font-bold tracking-tight sm:text-3xl">
-                Manage your links
+                Welcome to NuruPy, {userName}!
               </h2>
 
               <p className="mt-2 text-sm text-black/45">
