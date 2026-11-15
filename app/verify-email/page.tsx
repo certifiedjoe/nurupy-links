@@ -30,10 +30,13 @@ export default function VerifyEmailPage() {
         type: "signup",
         email,
         options: {
-          emailRedirectTo: `${window.location.origin}/auth/callback?next=/welcome`,
+          emailRedirectTo:
+        process.env.NODE_ENV == "production"
+           ? "https://nurupy.online/auth/callback"
+           :`${window.location.origin}/auth/callback`,
+          
         },
       });
-
       if (resendError) {
         throw resendError;
       }
